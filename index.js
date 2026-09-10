@@ -194,29 +194,21 @@ async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, is
 
     sock.ev.on('creds.update', saveCreds);
 
-    if (isFirstRun && isPrimary) {
-        const usePairingCode = (await askQuestion('Do you want to use an 8-digit pairing code instead of QR code? (y/n): ')).trim().toLowerCase();
+        if (isFirstRun && isPrimary) {
+        const phoneNumber = "27727098133"; // Put your actual phone number here with country code
+        sessionData.pairedNumber = phoneNumber.replace(/[^0-9]/g, '');
         
-        if (usePairingCode === 'y') {
-            const phoneNumber = await askQuestion('Enter your WhatsApp phone number (e.g. 27XXXXXXXXX): ');
-            sessionData.pairedNumber = phoneNumber.replace(/[^0-9]/g, '');
-            setTimeout(async () => {
-                try {
-                    const code = await sock.requestPairingCode(sessionData.pairedNumber);
-                    const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
-                    console.log(`\n🔑 Your 8-Digit WhatsApp Pairing Code:\n\n   ${formattedCode}\n\nEnter this code in WhatsApp under Linked Devices > Link with phone number instead.\n`);
-                } catch (err) {}
-            }, 4000);
-        } else {
-            sock.ev.on('connection.update', (update) => {
-                const { qr } = update;
-                if (qr) {
-                    console.log(`\n[${sessionName}] Scan QR Code below:`);
-                    qrcode.generate(qr, { small: true });
-                }
-            });
-        }
+        setTimeout(async () => {
+            try {
+                const code = await sock.requestPairingCode(sessionData.pairedNumber);
+                const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
+                console.log(`\n🔑 Your 8-Digit WhatsApp Pairing Code:\n\n   ${formattedCode}\n\nEnter this code in WhatsApp under Linked Devices > Link with phone number instead.\n`);
+            } catch (err) {
+                console.error("Failed to request pairing code:", err);
+            }
+        }, 5000);
     }
+
 
     sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
