@@ -1,0 +1,623 @@
+const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { TelegramClient } = require('telegram');
+const { StringSession } = require('telegram/sessions');
+const qrcode = require('qrcode-terminal');
+const readline = require('readline');
+const fs = require('fs');
+const path = require('path');
+
+const API_ID = 37250890;
+const API_HASH = 'dd2b4ccdec54ac3b4dd363ecac493304';
+const TARGET_BOT = 'ScriptoolzDecrypt_bot';
+const SESSION_FILE = path.join(__dirname, 'telegram_session.txt');
+const DB_FILE = path.join(__dirname, 'bot_database.json');
+const WHATSAPP_CHANNEL_LINK = 'https://whatsapp.com/channel/0029Vb9IKw17T8bZRw09iR2n';
+
+// Your active HilltopAds DirectLink configuration
+const HILLTOP_DIRECT_LINK = 'https://plump-plastic.com/gz19tk';
+const HILLTOP_API_KEY = '1H1nfnApO9MEcy4Sxp3kEcPDw4NERRHxI8AsV5ZikCqYtLV8vWi3oFczftEudOGX';
+
+// Termux storage path for logo image mapped via termux-setup-storage
+const LOGO_PATH = path.join(process.env.HOME || '/data/data/com.termux/files/home', 'storage', 'dcim', 'Screenshots', 'logo.jpg');
+
+// Database initialization
+let db = {
+    users: {}, // { senderNumber: { name, number, queriesCount, lastActive, banned } }
+    history: [], // [{ number, name, input, timestamp }]
+    adminPassword: '0734548144',
+    adEarnings: 0.00 // Fallback local tracker
+};
+
+if (fs.existsSync(DB_FILE)) {
+    try {
+        const loadedDb = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        db = { ...db, ...loadedDb };
+    } catch (e) {}
+}
+
+function saveDb() {
+    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+}
+
+// Function to fetch live balance from HilltopAds API
+async function fetchLiveHilltopBalance() {
+    try {
+        const response = await fetch(`https://api.hilltopads.com/publisher/balance?key=${HILLTOP_API_KEY}`);
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data && (data.balance !== undefined || data.amount !== undefined)) {
+            return parseFloat(data.balance || data.amount);
+        }
+    } catch (e) {
+        console.log('⚠️ Failed to fetch live HilltopAds balance, using local tracker:', e.message);
+    }
+    return null;
+}
+
+const BOT_FOOTER = "\n\n> © ᴘᴏᴡᴇʀᴇᴅ ʙʏ *ᴿ.ᴹ_⃝⃘̉̉ᴷᴴƐᵀᴴᵂᴬ*";
+
+function wrapMessage(body, sessionData) {
+    const currentMode = sessionData ? sessionData.mode.charAt(0).toUpperCase() + sessionData.mode.slice(1) : 'Public';
+    const currentPrefix = sessionData ? sessionData.prefix : '/';
+    
+    const dynamicHeader = `╭┈───〔 MKTOOLZ-WD 〕┈───⊷
+├✦ Creator: ᴿ.ᴹ_⃝⃘̉̉ᴷᴴƐᵀᴴᵂᴬ
+├✦ Status: Online
+├✦ Version: 1.0.0
+├✦ Mode: ${currentMode}
+├✦ Prefix: ${currentPrefix}
+╰───────────────────⊷`;
+
+    return `${dynamicHeader}\n\n{body}{BOT_FOOTER}`.replace('{body}', body).replace('{BOT_FOOTER}', BOT_FOOTER);
+}
+
+function cleanText(text, senderName = 'User') {
+    if (!text) return "";
+    let cleaned = text
+        .replace(/@ScriptoolzDecrypt_bot/gi, '')
+        .replace(/Telegram/gi, '')
+        .replace(/telegram/gi, '')
+        .replace(/t\.me\/[^\s]+/gi, '')
+        .replace(/sponsored/gi, '')
+        .replace(/ads?:?/gi, '')
+        .replace(/ad\s*[:\-].*?(?=\n|$)/gi, '')
+        .replace(/share\s*manage.*?(?=\n|$)/gi, '')
+        .replace(/join\s*our\s*channel.*?(?=\n|$)/gi, '')
+        .replace(/Next\s*request:\s*Wait\s*\d+s/gi, '')
+        .replace(/ENJOY/gi, '')
+        .replace(/TG:\s*https?:\/\/[^\s]*/gi, '')
+        .replace(/Create,\s*share\s*&\s*manage\s*VPN\s*configs\s*with\s*HTTP\s*Tweak\s*VPN:\s*https?:\/\/[^\s]*/gi, '')
+        .replace(/Requested\s*by:\s*[^\n]+/gi, '')
+        .replace(/You\s*are\s*free\s*to\s*use,\s*modify,\s*and\s*redistribute\s*this\s*work\s*for\s*any\s*purpose\..*?(?=\n|$)/gi, '')
+        .replace(/Attribution\s*is\s*not\s*required[^\n]*/gi, '')
+        .replace(/"dress"\s*:/gi, '"address":')
+        .replace(/\bdress\b/gi, 'address')
+        .replace(/\n\s*\n\s*\n/g, '\n\n')
+        .trim();
+    
+    return `👤 *Requested By:* ${senderName}\n\n${cleaned}`;
+}
+
+async function sendMediaMessage(sock, remoteJid, captionText, sessionData) {
+    const textToSend = wrapMessage(captionText, sessionData);
+    if (fs.existsSync(LOGO_PATH)) {
+        try {
+            await sock.sendMessage(remoteJid, {
+                image: fs.readFileSync(LOGO_PATH),
+                caption: textToSend
+            });
+            return;
+        } catch (err) {
+            console.log('⚠️ Failed to send image from storage, falling back to text:', err.message);
+        }
+    }
+    await sock.sendMessage(remoteJid, { text: textToSend });
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const askQuestion = (query) => new Promise((resolve) => rl.question(query, resolve));
+
+const activeSessions = new Map();
+const activeAdmins = new Set();
+
+async function startPrimaryBot() {
+    let savedSession = '';
+    if (fs.existsSync(SESSION_FILE)) {
+        savedSession = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+    }
+
+    const stringSession = new StringSession(savedSession);
+    global.tgClient = new TelegramClient(stringSession, API_ID, API_HASH, { connectionRetries: 5 });
+    
+    await global.tgClient.start({
+        phoneNumber: async () => await askQuestion('Please enter your phone number: '),
+        password: async () => await askQuestion('Please enter your 2FA password (if any): '),
+        phoneCode: async () => await askQuestion('Please enter the code you received: '),
+        onError: (err) => {},
+    });
+
+    const currentStringSession = global.tgClient.session.save();
+    fs.writeFileSync(SESSION_FILE, currentStringSession);
+
+    await createOrLoadWhatsAppSession('primary_session', null, true);
+}
+
+async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, isPrimary = false) {
+    const sessionDir = path.join(__dirname, `auth_${sessionName}`);
+    const credsPath = path.join(sessionDir, 'creds.json');
+    const isFirstRun = !fs.existsSync(credsPath);
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+    
+    const sock = makeWASocket({
+        auth: state,
+        printQRInTerminal: false,
+        markOnlineOnConnect: true,
+        browser: ["Ubuntu", "Chrome", "20.0.04"]
+    });
+
+    const sessionData = {
+        sock,
+        mode: 'public',
+        prefix: '/',
+        pairedNumber: pairingNumber ? pairingNumber.replace(/[^0-9]/g, '') : null,
+        startupSent: false
+    };
+    activeSessions.set(sessionName, sessionData);
+
+    sock.ev.on('creds.update', saveCreds);
+
+    if (isFirstRun && isPrimary) {
+        const usePairingCode = (await askQuestion('Do you want to use an 8-digit pairing code instead of QR code? (y/n): ')).trim().toLowerCase();
+        
+        if (usePairingCode === 'y') {
+            const phoneNumber = await askQuestion('Enter your WhatsApp phone number (e.g. 27XXXXXXXXX): ');
+            sessionData.pairedNumber = phoneNumber.replace(/[^0-9]/g, '');
+            setTimeout(async () => {
+                try {
+                    const code = await sock.requestPairingCode(sessionData.pairedNumber);
+                    const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
+                    console.log(`\n🔑 Your 8-Digit WhatsApp Pairing Code:\n\n   ${formattedCode}\n\nEnter this code in WhatsApp under Linked Devices > Link with phone number instead.\n`);
+                } catch (err) {}
+            }, 4000);
+        } else {
+            sock.ev.on('connection.update', (update) => {
+                const { qr } = update;
+                if (qr) {
+                    console.log(`\n[${sessionName}] Scan QR Code below:`);
+                    qrcode.generate(qr, { small: true });
+                }
+            });
+        }
+    }
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            if (shouldReconnect) {
+                createOrLoadWhatsAppSession(sessionName, pairingNumber, isPrimary);
+            }
+        } else if (connection === 'open') {
+            if (!sessionData.pairedNumber && sock.user && sock.user.id) {
+                sessionData.pairedNumber = sock.user.id.split(':')[0].replace(/[^0-9]/g, '');
+            }
+
+            if (sessionData.pairedNumber && !sessionData.startupSent) {
+                sessionData.startupSent = true;
+                const targetJid = `${sessionData.pairedNumber}@s.whatsapp.net`;
+                try {
+                    const startupText = `🤖 *Bot Connected Successfully!🤖*\n\n✅️This session is bound to number✅️: +${sessionData.pairedNumber}\n🇿🇦MKTOOLZ-WD is online and active🇿🇦.\n\n📢 *Join our WhatsApp Channel for updates:* ${WHATSAPP_CHANNEL_LINK}`;
+                    await sendMediaMessage(sock, targetJid, startupText, sessionData);
+                } catch (e) {}
+            }
+        }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages, type }) => {
+        if (type !== 'notify') return;
+        const msg = messages[0];
+        if (!msg.message) return;
+
+        const remoteJid = msg.key.remoteJid;
+        const senderNumber = remoteJid.includes('@s.whatsapp.net') ? remoteJid.split('@')[0].replace(/[^0-9]/g, '') : null;
+        const senderName = msg.pushName || 'User';
+        const messageType = Object.keys(msg.message)[0];
+        
+        let text = '';
+        if (messageType === 'conversation') {
+            text = msg.message.conversation;
+        } else if (messageType === 'extendedTextMessage') {
+            text = msg.message.extendedTextMessage.text;
+        }
+        
+        const currentPrefix = sessionData.prefix;
+        const trimmedText = text ? text.trim() : '';
+
+        if (!sessionData.pairedNumber && sock.user && sock.user.id) {
+            sessionData.pairedNumber = sock.user.id.split(':')[0].replace(/[^0-9]/g, '');
+        }
+
+        const cleanSender = senderNumber ? senderNumber.replace(/[^0-9]/g, '') : '';
+        const cleanPaired = sessionData.pairedNumber ? sessionData.pairedNumber.replace(/[^0-9]/g, '') : '';
+        const isPairedUser = cleanSender && cleanPaired && cleanSender === cleanPaired;
+
+        if (sessionData.mode === 'private' && !isPairedUser) {
+            return;
+        }
+
+        if (senderNumber) {
+            if (db.users[senderNumber] && db.users[senderNumber].banned) {
+                return;
+            }
+            if (!db.users[senderNumber]) {
+                db.users[senderNumber] = { name: senderName, number: senderNumber, queriesCount: 0, lastActive: Date.now(), banned: false };
+                try {
+                    if (sessionData.mode === 'public') {
+                        const welcomeUserMsg = `👋 *Welcome to MKTOOLZ-WD!*\n\nStay updated with the latest config updates and tools by joining our official channel:\n${WHATSAPP_CHANNEL_LINK}`;
+                        await sendMediaMessage(sock, remoteJid, welcomeUserMsg, sessionData);
+                    }
+                } catch (e) {}
+            } else {
+                db.users[senderNumber].name = senderName;
+                db.users[senderNumber].lastActive = Date.now();
+            }
+            saveDb();
+        }
+
+        if (trimmedText.startsWith(currentPrefix)) {
+            const args = trimmedText.slice(currentPrefix.length).trim().split(' ');
+            const command = args[0].toLowerCase();
+
+            const publicCommands = ['start', 'info', 'formats', 'pair'];
+            const adminMenuCommands = ['users', 'history', 'ban', 'unpair', 'exitdash'];
+            const pairedUserGlobalCommands = ['mode', 'prefix'];
+
+            if (!publicCommands.includes(command) && command !== 'admindash' && !adminMenuCommands.includes(command) && !pairedUserGlobalCommands.includes(command)) {
+                return;
+            }
+
+            if (pairedUserGlobalCommands.includes(command)) {
+                if (!isPairedUser) {
+                    await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage("❌ *Access Denied:* This command can only be executed by the paired user.", sessionData) });
+                    return;
+                }
+
+                if (command === 'mode') {
+                    const subArg = args[1] ? args[1].toLowerCase() : '';
+                    if (subArg === 'private' || subArg === 'public') {
+                        sessionData.mode = subArg;
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`🔓 *Success:* Bot session mode changed to **${subArg}**`, sessionData) });
+                    } else {
+                        await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { text: wrapMessage("❌ *Error:* Invalid syntax. Usage: `/mode public` or `/mode private`.", sessionData) });
+                    }
+                }
+                else if (command === 'prefix') {
+                    const newPrefix = args[1];
+                    if (newPrefix) {
+                        sessionData.prefix = newPrefix;
+                        await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`🔓 *Success:* Command prefix updated to **${newPrefix}**`, sessionData) });
+                    } else {
+                        await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                        await sock.sendMessage(remoteJid, { text: wrapMessage("❌ *Error:* Please provide a new prefix character or symbol. Usage: `/prefix *`", sessionData) });
+                    }
+                }
+                return;
+            }
+
+            if (command === 'pair') {
+                const targetNum = args[1];
+                if (!targetNum) {
+                    await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage("❌ *Error:* Please provide a phone number to pair. Usage: `/pair 27XXXXXXXXX`", sessionData) });
+                    return;
+                }
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                const newSessionName = `session_${Date.now()}`;
+                createOrLoadWhatsAppSession(newSessionName, targetNum, false);
+                
+                setTimeout(async () => {
+                    const targetSession = activeSessions.get(newSessionName);
+                    if (targetSession && targetSession.sock) {
+                        try {
+                            const code = await targetSession.sock.requestPairingCode(targetNum.trim());
+                            const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
+                            
+                            await sock.sendMessage(remoteJid, { text: formattedCode });
+                            
+                            const instructions = `🔑 *Pairing Successful for ${targetNum}*\n\n*How to connect:*\n1. Open WhatsApp on the target device\n2. Go to Settings > Linked Devices\n3. Tap 'Link a Device' > 'Link with phone number instead'\n4. Enter the 8-digit code above.\n\n📢 *Channel Updates:* ${WHATSAPP_CHANNEL_LINK}`;
+                            await sendMediaMessage(sock, remoteJid, instructions, sessionData);
+                        } catch (err) {}
+                    }
+                }, 6000);
+                return;
+            }
+
+            if (command === 'admindash') {
+                const passwordInput = args.slice(1).join(' ');
+                if (passwordInput === db.adminPassword) {
+                    activeAdmins.add(senderNumber);
+                    await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                    
+                    let liveBalance = await fetchLiveHilltopBalance();
+                    if (liveBalance !== null) {
+                        db.adEarnings = liveBalance;
+                        saveDb();
+                    }
+                    
+                    const totalUsers = Object.keys(db.users).length;
+                    const totalQueries = db.history.length;
+                    const earnings = (db.adEarnings || 0).toFixed(2);
+                    
+                    const dashBody = `👑 *PAIRED ADMIN DASHBOARD (ACTIVE)* 👑
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃        💰 *HILLTOPADS LIVE DASHBOARD*      ┃
+┃  💵 Real Revenue: \`$${earnings}\` USD      ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+📊 *System Metrics:*
+• Total Registered Users: ${totalUsers}
+• Total Queries Decrypted: ${totalQueries}
+• Channel Link: ${WHATSAPP_CHANNEL_LINK}
+
+🛠️ *Unlocked Admin Menu Commands:*
+• \`${currentPrefix}users\` - View complete user directory
+• \`${currentPrefix}history\` - View complete search history logs
+• \`${currentPrefix}ban <number>\` - Ban a user
+• \`${currentPrefix}unpair <number>\` - Remove user ban
+• \`${currentPrefix}exitdash\` - Close admin session menu`;
+
+                    await sock.sendMessage(remoteJid, { text: wrapMessage(dashBody, sessionData) });
+                } else {
+                    await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage("❌ *Access Denied:* Incorrect password.", sessionData) });
+                }
+                return;
+            }
+
+            if (adminMenuCommands.includes(command)) {
+                if (!activeAdmins.has(senderNumber)) {
+                    await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage(`❌ *Access Denied:* You have to be in admindash to use this command. Unlock it first using \`${currentPrefix}admindash <password>\``, sessionData) });
+                    return;
+                }
+
+                if (command === 'exitdash') {
+                    activeAdmins.delete(senderNumber);
+                    await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage("🔒 *Success:* Exited admin dashboard session. Admin menu commands are now locked.", sessionData) });
+                    return;
+                }
+                else if (command === 'users') {
+                    await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                    let userListText = '';
+                    for (const [num, u] of Object.entries(db.users)) {
+                        userListText += `• *${u.name}* (+${num}) — Queries: ${u.queriesCount} ${u.banned ? '[BANNED]' : ''}\n`;
+                    }
+
+                    const usersBody = `👥 *COMPLETE REGISTERED USERS DIRECTORY*\n\n${userListText || 'No users recorded yet.'}`;
+                    await sock.sendMessage(remoteJid, { text: wrapMessage(usersBody, sessionData) });
+                }
+                else if (command === 'history') {
+                    await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                    const allHistory = [...db.history].reverse();
+                    let historyText = allHistory.map(h => `• [${new Date(h.timestamp).toLocaleString()}] *${h.name}* (+${h.number}): Decrypted config`).join('\n');
+
+                    const historyBody = `📜 *COMPLETE USER SEARCH HISTORY*\n\n${historyText || 'No history records found.'}`;
+                    await sock.sendMessage(remoteJid, { text: wrapMessage(historyBody, sessionData) });
+                }
+                else if (command === 'ban') {
+                    const targetBanNum = args[1] ? args[1].replace(/[^0-9]/g, '') : '';
+                    if (!targetBanNum) {
+                        await sock.sendMessage(remoteJid, { text: wrapMessage("❌ Usage: `/ban <number>`", sessionData) });
+                        return;
+                    }
+                    if (db.users[targetBanNum]) {
+                        db.users[targetBanNum].banned = true;
+                        saveDb();
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`✅ User +${targetBanNum} has been banned from using the bot.`, sessionData) });
+                    } else {
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`❌ User +${targetBanNum} not found in database.`, sessionData) });
+                    }
+                }
+                else if (command === 'unpair') {
+                    const targetUnpairNum = args[1] ? args[1].replace(/[^0-9]/g, '') : '';
+                    if (!targetUnpairNum) {
+                        await sock.sendMessage(remoteJid, { text: wrapMessage("❌ Usage: `/unpair <number>`", sessionData) });
+                        return;
+                    }
+                    if (db.users[targetUnpairNum]) {
+                        db.users[targetUnpairNum].banned = false;
+                        saveDb();
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`✅ User +${targetUnpairNum} unbanned / status reset.`, sessionData) });
+                    } else {
+                        await sock.sendMessage(remoteJid, { text: wrapMessage(`❌ User not found.`, sessionData) });
+                    }
+                }
+                return;
+            }
+
+            if (command === 'start') {
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                const body = `Welcome to MKTOOLZ-WD
+
+Send me a supported config file or format, and I'll decrypt it for you.
+
+*Available Commands:*
+• \`${currentPrefix}start\` - Display start message & command list
+• \`${currentPrefix}info\` - View bot details & menu
+• \`${currentPrefix}formats\` - View supported config formats
+• \`${currentPrefix}pair <number>\` - Generate pairing code
+
+📢 *Official Channel:* ${WHATSAPP_CHANNEL_LINK}`;
+                await sendMediaMessage(sock, remoteJid, body, sessionData);
+            } 
+            else if (command === 'info') {
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                const body = `📋 *BOT INFORMATION* 📋
+
+• *Bot Name:* MKTOOLZ-WD
+• *Owner:* Ramantswana Mukhethwa
+• *Bot Version:* 1.0.0
+• *Creation Date:* July 2026
+• *Channel:* ${WHATSAPP_CHANNEL_LINK}
+
+ 『 ᴍᴇɴᴜ  』
+╭───────────────────⊷
+┋ ⡡ ${currentPrefix}formats 
+┋ ⡡ ${currentPrefix}start
+┋ ⡡ ${currentPrefix}info 
+┋ ⡡ ${currentPrefix}pair
+╰───────────────────⊷`;
+                await sendMediaMessage(sock, remoteJid, body, sessionData);
+            } 
+            else if (command === 'formats') {
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                const body = `*Supported Config Formats:*
+
+• HTTP Injector (\`.ehi\`, \`.ehil\`)
+• HTTP Custom (\`.hc\`)
+• HA Tunnel (\`.hat\`)
+• TLS Tunnel (\`.tls\`)
+• SocksIP, NetMod, DarkTunnel, and more.`;
+                await sock.sendMessage(remoteJid, { text: wrapMessage(body, sessionData) });
+            }
+        }
+        else if (messageType === 'documentMessage' || messageType === 'fileMessage') {
+            if (senderNumber && db.users[senderNumber] && db.users[senderNumber].banned) return;
+
+            if (senderNumber) {
+                db.users[senderNumber].queriesCount = (db.users[senderNumber].queriesCount || 0) + 1;
+                db.history.push({ number: senderNumber, name: senderName, timestamp: Date.now() });
+                db.adEarnings = (db.adEarnings || 0) + 0.005;
+                saveDb();
+            }
+
+            await sock.sendMessage(remoteJid, { react: { text: '🔄', key: msg.key } });
+            
+            let tempFilePath = null;
+            let statusMsg = null;
+
+            try {
+                const messageContent = msg.message[messageType];
+                const stream = await downloadContentFromMessage(messageContent, messageType === 'documentMessage' ? 'document' : 'file');
+                let buffer = Buffer.from([]);
+                for await (const chunk of stream) {
+                    buffer = Buffer.concat([buffer, chunk]);
+                }
+                
+                const fileName = messageContent.fileName || 'config_file';
+                tempFilePath = path.join(__dirname, fileName);
+                fs.writeFileSync(tempFilePath, buffer);
+
+                const initialTgMessages = await global.tgClient.getMessages(TARGET_BOT, { limit: 10 });
+                const existingIds = new Set(initialTgMessages.map(m => m.id));
+
+                await global.tgClient.sendFile(TARGET_BOT, {
+                    file: tempFilePath,
+                    caption: "Decrypt this config"
+                });
+
+                statusMsg = await sock.sendMessage(remoteJid, { text: wrapMessage("⏳ *Processing configuration file...*", sessionData) });
+
+                let finalMsg = null;
+                const startTime = Date.now();
+                const timeoutMs = 70000; 
+
+                while (Date.now() - startTime < timeoutMs) {
+                    const elapsedSeconds = Math.floor((Date.now() - startTime) / 1000);
+                    const fetched = await global.tgClient.getMessages(TARGET_BOT, { limit: 10 });
+                    
+                    if (fetched && fetched.length > 0) {
+                        for (const currentMsg of fetched) {
+                            if (!existingIds.has(currentMsg.id) && !currentMsg.out) {
+                                if (currentMsg.media || (currentMsg.message && currentMsg.message.trim().length > 0)) {
+                                    finalMsg = currentMsg;
+                                    break;
+                                }
+                            }
+                        }
+                        if (finalMsg) break;
+                    }
+
+                    try {
+                        await sock.sendMessage(remoteJid, { 
+                            edit: statusMsg.key, 
+                            text: wrapMessage(`⏳ *Processing configuration...*\n⏱️ *Elapsed time:* ${elapsedSeconds} seconds`, sessionData) 
+                        });
+                    } catch (e) {}
+
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+
+                if (!finalMsg) {
+                    const fallbackFetched = await global.tgClient.getMessages(TARGET_BOT, { limit: 5 });
+                    if (fallbackFetched && fallbackFetched.length > 0) {
+                        for (const m of fallbackFetched) {
+                            if (!m.out && (m.media || (m.message && m.message.trim().length > 0))) {
+                                finalMsg = m;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (!finalMsg) {
+                    await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                    await sock.sendMessage(remoteJid, { text: wrapMessage(`❌ @${senderName} decryption timed out. Please try again.`, sessionData) });
+                    if (fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+                    try { await sock.sendMessage(remoteJid, { delete: statusMsg.key }); } catch (e) {}
+                    return;
+                }
+
+                await sock.sendMessage(remoteJid, { react: { text: '✅', key: msg.key } });
+                
+                let decryptedContentText = '';
+                if (finalMsg.media) {
+                    const downloadedBuffer = await global.tgClient.downloadMedia(finalMsg);
+                    const outputFilePath = path.join(__dirname, `decrypted_${Date.now()}.txt`);
+                    fs.writeFileSync(outputFilePath, downloadedBuffer);
+
+                    let fileText = fs.readFileSync(outputFilePath, 'utf8');
+                    fs.unlinkSync(outputFilePath);
+                    const cleaned = cleanText(fileText, senderName);
+                    decryptedContentText = `🔓 *Decrypted Configuration Data:*\n\n\`\`\`\n${cleaned}\n\`\`\``;
+                } else if (finalMsg.message) {
+                    const rawText = typeof finalMsg.message === 'string' ? finalMsg.message : (finalMsg.message.message || JSON.stringify(finalMsg.message));
+                    const cleaned = cleanText(rawText, senderName);
+                    decryptedContentText = `🔓 *Decrypted Data:*\n\n\`\`\`\n${cleaned}\n\`\`\``;
+                }
+
+                // Standalone clickable sponsor link on its own line
+                const sponsorBlock = `\n\n📢 *Sponsored Partner Offer:*\nTap below to support:\n${HILLTOP_DIRECT_LINK}`;
+                
+                await sock.sendMessage(remoteJid, { text: wrapMessage(decryptedContentText + sponsorBlock, sessionData) });
+
+                if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+                if (statusMsg) {
+                    try { await sock.sendMessage(remoteJid, { delete: statusMsg.key }); } catch (e) {}
+                }
+
+            } catch (error) {
+                if (tempFilePath && fs.existsSync(tempFilePath)) fs.unlinkSync(tempFilePath);
+                if (statusMsg) {
+                    try { await sock.sendMessage(remoteJid, { delete: statusMsg.key }); } catch (e) {}
+                }
+                await sock.sendMessage(remoteJid, { react: { text: '❌', key: msg.key } });
+                await sock.sendMessage(remoteJid, { text: wrapMessage(`❌ *Error:* Decryption process failed: ${error.message}`, sessionData) });
+            }
+        }
+        else {
+            return;
+        }
+    });
+}
+
+startPrimaryBot();
+

@@ -1,0 +1,6 @@
+node_modules/
+auth_*
+telegram_session.txt
+bot_database.json
+*.log
+
