@@ -194,19 +194,19 @@ async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, is
 
     sock.ev.on('creds.update', saveCreds);
 
-        if (isFirstRun && isPrimary) {
-        const phoneNumber = "27727098133"; // Put your actual phone number here with country code
-        sessionData.pairedNumber = phoneNumber.replace(/[^0-9]/g, '');
-        
+        if (!sock.authState.creds.registered) {
         setTimeout(async () => {
             try {
-                const code = await sock.requestPairingCode(sessionData.pairedNumber);
+                const phoneNumber = "27727098133"; // Replace with your phone number
+                const pairedNumber = phoneNumber.replace(/[^0-9]/g, '''');
+                const code = await sock.requestPairingCode(pairedNumber);
                 const formattedCode = code?.match(/.{1,4}/g)?.join('-') || code;
                 console.log(`\n🔑 Your 8-Digit WhatsApp Pairing Code:\n\n   ${formattedCode}\n\nEnter this code in WhatsApp under Linked Devices > Link with phone number instead.\n`);
             } catch (err) {
                 console.error("Failed to request pairing code:", err);
             }
         }, 5000);
+    }, 5000);
     }
 
 
