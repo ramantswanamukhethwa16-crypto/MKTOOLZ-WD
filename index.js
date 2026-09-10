@@ -1,3 +1,25 @@
+// 1. Global Error Handlers (Prevents app from crashing on minor exceptions)
+process.on('uncaughtException', (err) => {
+  console.error('Caught exception: ', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// 2. Built-in Express Keep-Alive Server (Ensures Render detects an active web port)
+const express = require('express');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.status(200).send('MKTOOLZ-WD Bot is active and running 24/7!');
+});
+
+app.listen(PORT, () => {
+  console.log(`Keep-alive web server running on port ${PORT}`);
+});
+
 const { makeWASocket, useMultiFileAuthState, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const { TelegramClient } = require('telegram');
 const { StringSession } = require('telegram/sessions');
@@ -121,25 +143,30 @@ const activeSessions = new Map();
 const activeAdmins = new Set();
 
 async function startPrimaryBot() {
-    let savedSession = '';
-    if (fs.existsSync(SESSION_FILE)) {
-        savedSession = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+    try {
+        let savedSession = '';
+        if (fs.existsSync(SESSION_FILE)) {
+            savedSession = fs.readFileSync(SESSION_FILE, 'utf8').trim();
+        }
+
+        const stringSession = new StringSession(savedSession);
+        global.tgClient = new TelegramClient(stringSession, API_ID, API_HASH, { connectionRetries: 5 });
+        
+        await global.tgClient.start({
+            phoneNumber: async () => await askQuestion('Please enter your phone number: '),
+            password: async () => await askQuestion('Please enter your 2FA password (if any): '),
+            phoneCode: async () => await askQuestion('Please enter the code you received: '),
+            onError: (err) => {},
+        });
+
+        const currentStringSession = global.tgClient.session.save();
+        fs.writeFileSync(SESSION_FILE, currentStringSession);
+
+        await createOrLoadWhatsAppSession('primary_session', null, true);
+    } catch (err) {
+        console.error('Telegram connection error, attempting restart in 5 seconds...', err);
+        setTimeout(startPrimaryBot, 5000);
     }
-
-    const stringSession = new StringSession(savedSession);
-    global.tgClient = new TelegramClient(stringSession, API_ID, API_HASH, { connectionRetries: 5 });
-    
-    await global.tgClient.start({
-        phoneNumber: async () => await askQuestion('Please enter your phone number: '),
-        password: async () => await askQuestion('Please enter your 2FA password (if any): '),
-        phoneCode: async () => await askQuestion('Please enter the code you received: '),
-        onError: (err) => {},
-    });
-
-    const currentStringSession = global.tgClient.session.save();
-    fs.writeFileSync(SESSION_FILE, currentStringSession);
-
-    await createOrLoadWhatsAppSession('primary_session', null, true);
 }
 
 async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, isPrimary = false) {
@@ -196,8 +223,11 @@ async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, is
 
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            console.log(`WhatsApp connection closed for ${sessionName}. Reconnecting: ${shouldReconnect}`);
             if (shouldReconnect) {
-                createOrLoadWhatsAppSession(sessionName, pairingNumber, isPrimary);
+                setTimeout(() => {
+                    createOrLoadWhatsAppSession(sessionName, pairingNumber, isPrimary);
+                }, 3000);
             }
         } else if (connection === 'open') {
             if (!sessionData.pairedNumber && sock.user && sock.user.id) {
@@ -208,7 +238,7 @@ async function createOrLoadWhatsAppSession(sessionName, pairingNumber = null, is
                 sessionData.startupSent = true;
                 const targetJid = `${sessionData.pairedNumber}@s.whatsapp.net`;
                 try {
-                    const startupText = `🤖 *Bot Connected Successfully!🤖*\n\n✅️This session is bound to number✅️: +${sessionData.pairedNumber}\n🇿🇦MKTOOLZ-WD is online and active🇿🇦.\n\n📢 *Join our WhatsApp Channel for updates:* ${WHATSAPP_CHANNEL_LINK}`;
+                    const startupText = `✅️ *Bot Connection Established Successfully!✅️*\n\n🤖This session is bound to number🤖: +${sessionData.pairedNumber}\n🇿🇦MKTOOLZ-WD is online and active.🇿🇦\n\n📢 *Join our WhatsApp Channel for updates:* ${WHATSAPP_CHANNEL_LINK}`;
                     await sendMediaMessage(sock, targetJid, startupText, sessionData);
                 } catch (e) {}
             }
